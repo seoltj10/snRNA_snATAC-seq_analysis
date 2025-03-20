@@ -1,0 +1,118 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+
+suppressMessages({
+  library(Seurat)
+  library(Signac)
+  library(org.Mm.eg.db)
+  library(dplyr)
+  library(parallel)
+  library(stringr)
+  library(SeuratWrappers)
+  library(ggplot2)
+  library(grid)
+  library(pals)
+  library(ggsci)
+  library(ggpubr)
+  library(cowplot)
+  library(limma)
+  })
+
+```
+
+```{r}
+#RNA vs. gene activity - LAKO vs Control
+
+RNA.obj@meta.data$ID2 <- paste0(RNA.obj@meta.data$ID,'_',RNA.obj@meta.data$celltypes)
+RNA.obj@meta.data$Adipo <- ifelse(RNA.obj@meta.data$pong == 'Control_Adipocyte'| RNA.obj@meta.data$ID2 =='Control_Dedifferentiated_adipocyte','Control_adipo',ifelse(RNA.obj@meta.data$pong == 'Mutant_Adipocyte'| RNA.obj@meta.data$ID2 =='Mutant_Dedifferentiated_adipocyte','Mutant_adipo','etc')) 
+
+ATAC.obj@meta.data$ID2 <- paste0(ATAC.obj@meta.data$ID,'_',ATAC.obj@meta.data$celltypes)
+ATAC.obj@meta.data$Adipo <- ifelse(ATAC.obj@meta.data$ID2 == 'Control_Adipocyte'| ATAC.obj@meta.data$ID2 =='Control_Dedifferentiated_adipocyte','Control_adipo',ifelse(ATAC.obj@meta.data$ID2 == 'Mutant_Adipocyte'| ATAC.obj@meta.data$ID2 =='Mutant_Dedifferentiated_adipocyte','Mutant_adipo','etc')) 
+
+Idents(object = RNA.obj) <- "Adipo"
+Idents(object = ATAC.obj) <- "Adipo"
+
+aver_exp <- FindMarkers(RNA.obj, 
+                        ident.1 = 'Mutant_adipo', 
+                        ident.2 = 'Control_adipo', 
+                        assays="SCT", 
+                        min.pct=0, 
+                        logfc.threshold=0)#, latent.vars = 'nCount_SCT')
+
+aver_activity <- FindMarkers(ATAC.obj, 
+                             ident.1 = 'Mutant_adipo', 
+                             ident.2 = 'Control_adipo',
+                             assay = 'RNAscore',
+                             test.use="LR", 
+                             min.pct=0, 
+                             logfc.threshold=0, 
+                             latent.vars = 'nCount_peaks')
+
+aver_exp$gene <- row.names(aver_exp)
+aver_activity$gene <- row.names(aver_activity)
+
+aver_exp$gene <- alias2SymbolTable(aver_exp$gene, species = 'Mm')
+aver_activity$gene <- alias2SymbolTable(aver_activity$gene, species = 'Mm')
+aver_activity[is.na(aver_activity$gene),]
+
+mat <- tryCatch(full_join(aver_exp, aver_activity, by = "gene"), error=function(e) NULL)
+
+arrange(mat[is.na(mat$pct.1.x) | is.na(mat$pct.1.y),], desc(gene))
+
+df.full <- data.frame(gene = mat$gene,
+                       rna = mat$avg_log2FC.x, 
+                       atac = mat$avg_log2FC.y, 
+                       gene_adj_pval = mat$p_val_adj.x, 
+                       chrom_adj_pval = mat$p_val_adj.y, 
+                       rna.pct.diff = mat$pct.1.x-mat$pct.2.x,
+                       pct.max = pmax(mat$pct.1.x,mat$pct.2.x))
+
+df.full <- df.full[!(is.na(df.full$gene)),]
+
+#write.csv(df.full, file = "Results/LAKO_vs_Control_exp_vs_activity.csv")
+
+#TF list from AnimalTFDB
+TF.list <- read.table(file = 'Mus_musculus_TF.txt',sep = '\t', header = T)
+TF.cofactor.list <- read.table(file = 'Mus_musculus_TF_cofactors.txt',sep = '\t', header = T)
+TF.cofactor.list
+
+Full.list<- c(TF.list$Symbol,TF.cofactor.list$Symbol)
+Full.list
+
+Full.list.converted <- alias2SymbolTable(Full.list, species = 'Mm')
+
+df.TFrelated <- df.full[df.full$gene %in% Full.list.converted,]
+df.TFrelated
+
+#write.csv(df.TFrelated, file = "Results/LAKO_vs_Control_TFrelated_exp_vs_activity.csv")
+#df.TFrelated <- read.csv(file = "Results/LAKO_vs_Control_TFrelated_exp_vs_activity.csv")
+
+df.TFrelated <- na.omit(df.TFrelated)
+
+cor.test(df.TFrelated$atac, df.TFrelated$rna, method="pearson", conf.level=0.95)
+
+Fig.6a <- ggplot(df.TFrelated, aes(x=rna, y=atac, fill=pct.max)) +
+  geom_smooth(method="lm", color = "darkgray") +
+  geom_hline(yintercept=0) +
+  geom_vline(xintercept=0) +
+  geom_hline(yintercept=log2(1.5), color='gray',linetype = "dashed") +
+  geom_hline(yintercept=-log2(1.5), color ='gray',linetype = "dashed") +
+  geom_vline(xintercept=log2(1.5), color='gray',linetype = "dashed") +
+  geom_vline(xintercept=-log2(1.5), color='gray',linetype = "dashed") +
+  geom_point(shape=21,size=1.5, stroke = 0.2, color='gray10')+ scale_fill_gradientn(colours = rev(brewer.pal(n = 11, name = "RdBu")), name='Max.pct') +
+#  geom_point(shape = 21, color='black', fill=ifelse(df.f.2$chrom_adj_pval < 0.05 & df.f.2$gene_adj_pval < 0.05, ifelse(df.f.2$rna > log2(1.5),'salmon', ifelse(df.f.2$rna < -log2(1.5),'skyblue','black')),'darkgray')) +
+  xlab("Gene activity (avg_log2FC)") +
+  ylab("Gene expression (avg_log2FC)") +
+  ggtitle("Gene expression - activity correlation:", subtitle = "LAKO vs. Control (TF-related)") +
+  xlim(c(-1.3,1.3)) +
+  ylim(c(-1.3,1.3)) +
+  theme_pubr() +
+  theme(aspect.ratio = 1) 
+
+```
+
